@@ -1,0 +1,6 @@
+html_study/
+.env
+venv/
+chromedriver
+appointment_state.json
+appointment_checker.log
