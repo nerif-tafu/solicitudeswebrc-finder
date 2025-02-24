@@ -45,7 +45,6 @@ class AppointmentChecker:
         chrome_options.add_argument(f'--user-data-dir={user_data_dir}')
         
         # Headless mode settings
-        chrome_options.add_argument('--headless=new')  # New headless mode
         chrome_options.add_argument('--window-size=1920,1080')  # Set a standard window size
         chrome_options.add_argument('--start-maximized')
         
@@ -156,15 +155,109 @@ class AppointmentChecker:
 
     def check_appointment(self, region_id, offices, days_to_search=30):
         self.logger.info(f"Starting appointment check for region {region_id}")
-        # Select region from dropdown
+        
+        # Load previous state at the start
+        previous_state = self.load_previous_state()
+        previous_earliest = None
+        cutoff_date = None  # Will be set if current appointment is still valid
+        
+        # First check if previous earliest appointment is still available
+        if 'earliest' in previous_state:
+            previous_appointment = previous_state['earliest']
+            previous_earliest = self.parse_appointment_date(previous_appointment['appointment'])
+            previous_office = previous_appointment['office']
+            
+            self.logger.info(f"Checking if previous appointment is still available: {previous_appointment['appointment']} at {previous_office}")
+            
+            # Select region from dropdown
+            region_dropdown = Select(self.wait.until(
+                EC.presence_of_element_located((By.ID, "selectRegion"))
+            ))
+            region_dropdown.select_by_value(region_id)
+            time.sleep(2)
+            
+            # Get office dropdown and select previous office
+            office_dropdown = Select(self.wait.until(
+                EC.presence_of_element_located((By.ID, "selectOficinas"))
+            ))
+            
+            try:
+                office_dropdown.select_by_visible_text(previous_office)
+                
+                # Parse the date from the previous appointment using our existing parse_appointment_date method
+                prev_date = self.parse_appointment_date(previous_appointment['appointment'])
+                formatted_date = prev_date.strftime("%d/%m/%Y")
+                
+                # Check that specific date
+                date_field = self.wait.until(
+                    EC.presence_of_element_located((By.ID, "idFechaSeleccionadaDesde"))
+                )
+                self.driver.execute_script("arguments[0].removeAttribute('readonly')", date_field)
+                date_field.clear()
+                date_field.send_keys(formatted_date)
+                
+                # Click search button
+                search_button = self.wait.until(
+                    EC.element_to_be_clickable((By.ID, "idBtnBuscarFechaDisponible"))
+                )
+                search_button.click()
+                
+                # Wait for loader
+                self.wait.until(
+                    EC.presence_of_element_located((By.ID, "idBuscarHoraLoaderContainer"))
+                )
+                self.wait.until(
+                    EC.invisibility_of_element_located((By.ID, "idBuscarHoraLoaderContainer"))
+                )
+                
+                # Check if the appointment is still there
+                appointments_container = self.wait.until(
+                    EC.presence_of_element_located((By.ID, "idHorasDisponiblesContainer"))
+                )
+                appointment_cards = appointments_container.find_elements(
+                    By.XPATH, ".//div[contains(@class, 'card') and not(contains(@style, 'display: none'))]"
+                )
+                
+                appointment_still_available = False
+                for card in appointment_cards:
+                    try:
+                        day = card.find_element(By.TAG_NAME, "h1").text
+                        month = card.find_element(By.TAG_NAME, "h5").text
+                        appointment_time = card.find_element(By.TAG_NAME, "h6").text
+                        if f"{day} {month} {appointment_time}" == previous_appointment['appointment']:
+                            appointment_still_available = True
+                            break
+                    except:
+                        continue
+                
+                if appointment_still_available:
+                    self.logger.info("Previous appointment is still available")
+                    # Set cutoff date to the current appointment date
+                    cutoff_date = previous_earliest
+                    
+                else:
+                    self.logger.info("Previous appointment is no longer available!")
+                    notification = (
+                        f"Previous appointment is no longer available!\n"
+                        f"Lost appointment: {previous_appointment['appointment']} at {previous_office}\n"
+                        f"Searching for new earlier appointment..."
+                    )
+                    asyncio.run(self.send_telegram_message(notification))
+                    previous_earliest = None  # Reset so we'll treat next found appointment as first
+                    self.save_state({})  # Clear the previous state
+            
+            except Exception as e:
+                self.logger.error(f"Error checking previous appointment: {str(e)}")
+                # Continue with regular search even if checking previous appointment fails
+        
+        # Continue with regular appointment search
+        # Select region again to ensure clean state
         region_dropdown = Select(self.wait.until(
             EC.presence_of_element_located((By.ID, "selectRegion"))
         ))
         region_dropdown.select_by_value(region_id)
-
-        # Wait for office dropdown to be populated
         time.sleep(2)
-
+        
         # Get office dropdown
         office_dropdown = Select(self.wait.until(
             EC.presence_of_element_located((By.ID, "selectOficinas"))
@@ -173,7 +266,7 @@ class AppointmentChecker:
         available_appointments = {}
         earliest_appointment = None
         earliest_office = None
-
+        
         # Check each office
         for office in offices:
             try:
@@ -181,10 +274,16 @@ class AppointmentChecker:
                 office_dropdown.select_by_visible_text(office)
                 office_appointments = []
                 
-                # Check next X days
+                # Check next X days, but only up to cutoff_date if it exists
                 current_date = datetime.now()
                 for i in range(days_to_search):
                     check_date = current_date + timedelta(days=i)
+                    
+                    # Skip dates after the cutoff date if it exists
+                    if cutoff_date and check_date.date() > cutoff_date.date():
+                        self.logger.info(f"Skipping remaining dates for {office} as they are after current appointment")
+                        break
+                    
                     formatted_date = check_date.strftime("%d/%m/%Y")
                     
                     try:
@@ -210,25 +309,66 @@ class AppointmentChecker:
                             EC.invisibility_of_element_located((By.ID, "idBuscarHoraLoaderContainer"))
                         )
 
-                        # Check for available appointments
+                        # Check for available appointments more efficiently
                         appointments_container = self.wait.until(
                             EC.presence_of_element_located((By.ID, "idHorasDisponiblesContainer"))
                         )
 
-                        # Look for visible appointment cards
-                        appointment_cards = appointments_container.find_elements(
-                            By.XPATH, ".//div[contains(@class, 'card') and not(contains(@style, 'display: none'))]"
-                        )
+                        # Get all card data at once using a single JavaScript execution
+                        cards_data = self.driver.execute_script("""
+                            const cards = document.querySelectorAll('#idHorasDisponiblesContainer .card:not([style*="display: none"])');
+                            return Array.from(cards).map(card => ({
+                                day: card.querySelector('h1').textContent,
+                                month: card.querySelector('h5').textContent,
+                                time: card.querySelector('h6').textContent
+                            }));
+                        """)
 
-                        if appointment_cards:
-                            for card in appointment_cards:
-                                try:
-                                    day = card.find_element(By.TAG_NAME, "h1").text
-                                    month = card.find_element(By.TAG_NAME, "h5").text
-                                    appointment_time = card.find_element(By.TAG_NAME, "h6").text
-                                    office_appointments.append(f"{day} {month} {appointment_time}")
-                                except:
-                                    continue
+                        for card_data in cards_data:
+                            try:
+                                appointment_str = f"{card_data['day']} {card_data['month']} {card_data['time']}"
+                                
+                                # Check if this appointment is earlier than our previous earliest
+                                current_date = self.parse_appointment_date(appointment_str)
+                                if previous_earliest and current_date < previous_earliest:
+                                    notification = (
+                                        f"New earlier appointment found!\n"
+                                        f"Previous: {previous_state['earliest']['appointment']} at {previous_state['earliest']['office']}\n"
+                                        f"New: {appointment_str} at {office}"
+                                    )
+                                    self.logger.info(f"New earlier appointment found: {appointment_str} at {office}")
+                                    asyncio.run(self.send_telegram_message(notification))
+                                    
+                                    # Update state immediately
+                                    self.save_state({
+                                        'earliest': {
+                                            'appointment': appointment_str,
+                                            'office': office
+                                        }
+                                    })
+                                    # Update previous_earliest for subsequent comparisons
+                                    previous_earliest = current_date
+                                elif not previous_earliest:  # First appointment ever found
+                                    notification = (
+                                        f"First appointment found!\n"
+                                        f"Date: {appointment_str} at {office}"
+                                    )
+                                    self.logger.info("First appointment found")
+                                    asyncio.run(self.send_telegram_message(notification))
+                                    
+                                    # Save initial state
+                                    self.save_state({
+                                        'earliest': {
+                                            'appointment': appointment_str,
+                                            'office': office
+                                        }
+                                    })
+                                    previous_earliest = current_date
+                                    
+                                office_appointments.append(appointment_str)
+                            except Exception as e:
+                                self.logger.error(f"Error processing appointment data: {str(e)}")
+                                continue
                 
                     except Exception as e:
                         error_msg = f"Error checking date {formatted_date} for office {office}: {str(e)}"
@@ -245,9 +385,7 @@ class AppointmentChecker:
                     )
                     available_appointments[office] = sorted_appointments
                     
-                    # Check if this is the earliest appointment overall
-                    current_earliest = self.parse_appointment_date(sorted_appointments[0])
-                    if earliest_appointment is None or current_earliest < self.parse_appointment_date(earliest_appointment):
+                    if earliest_appointment is None or self.parse_appointment_date(sorted_appointments[0]) < self.parse_appointment_date(earliest_appointment):
                         earliest_appointment = sorted_appointments[0]
                         earliest_office = office
 
@@ -258,39 +396,6 @@ class AppointmentChecker:
                 self.logger.error(error_msg)
                 print(error_msg)
                 continue
-
-        # Load previous state and compare
-        previous_state = self.load_previous_state()
-        
-        if earliest_appointment:
-            self.logger.info(f"Earliest appointment found: {earliest_appointment} at {earliest_office}")
-            current_date = self.parse_appointment_date(earliest_appointment)
-            
-            if 'earliest' in previous_state:
-                prev_date = self.parse_appointment_date(previous_state['earliest']['appointment'])
-                if current_date < prev_date:
-                    notification = (
-                        f"¡Nueva cita más temprana encontrada!\n"
-                        f"Anterior: {previous_state['earliest']['appointment']} en {previous_state['earliest']['office']}\n"
-                        f"Nueva: {earliest_appointment} en {earliest_office}"
-                    )
-                    self.logger.info(f"New earlier appointment found: {earliest_appointment} at {earliest_office}")
-                    asyncio.run(self.send_telegram_message(notification))
-            else:
-                notification = (
-                    f"¡Primera cita encontrada!\n"
-                    f"Fecha: {earliest_appointment} en {earliest_office}"
-                )
-                self.logger.info("First appointment found")
-                asyncio.run(self.send_telegram_message(notification))
-
-            # Save new state
-            self.save_state({
-                'earliest': {
-                    'appointment': earliest_appointment,
-                    'office': earliest_office
-                }
-            })
 
         return available_appointments
 
