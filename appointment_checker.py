@@ -45,6 +45,7 @@ class AppointmentChecker:
         chrome_options.add_argument(f'--user-data-dir={user_data_dir}')
         
         # Headless mode settings
+        chrome_options.add_argument('--headless=new')  # New headless mode
         chrome_options.add_argument('--window-size=1920,1080')  # Set a standard window size
         chrome_options.add_argument('--start-maximized')
         
