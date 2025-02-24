@@ -4,24 +4,29 @@ This script checks for available appointments at the SRCEI (Servicio de Registro
 
 ## Setup and run
 
-1. Download chromedriver from https://googlechromelabs.github.io/chrome-for-testing/#stable and put it in the root of the project
+1. Download chromium snap with 
+```
+sudo snap install chromium
+```
 
-2. Create and activate virtual environment:
+2. Download chromedriver from https://googlechromelabs.github.io/chrome-for-testing/#stable and put it in the root of the project
+
+3. Create and activate virtual environment:
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-3. Install dependencies:
+4. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Create a telegram bot for notifications:
+5. Create a telegram bot for notifications:
 - Go to https://t.me/BotFather and create a new bot
 - Get the token and chat id
 
-5. Create a .env file in the root of the project with your credentials:
+6. Create a .env file in the root of the project with your credentials:
 ```
 RUN=your_run
 PASSWORD=your_password
@@ -39,12 +44,60 @@ Note:
 - DAYS_TO_SEARCH is the number of days to look ahead for appointments (default: 30)
 - WAIT_TIME is the number of seconds to wait between runs (default: 60)
 
-6. Make chromedriver executable:
+7. Make chromedriver executable:
 ```bash
 chmod +x chromedriver
 ```
 
-7. Run the script:
+8. Run the script:
 ```bash
 python3 appointment_checker.py
+```
+
+## Running as a systemd service
+
+To run the script as a background service that starts automatically on boot:
+
+1. Create a systemd service file named `appointment-checker.service`:
+```ini
+[Unit]
+Description=SRCEI Appointment Checker Service
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/your/project
+Environment="PATH=/path/to/your/project/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/path/to/your/project/venv/bin/python3 appointment_checker.py
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+```
+
+2. Replace in the service file:
+   - `YOUR_USERNAME` with your Linux username
+   - `/path/to/your/project` with the absolute path to your project directory
+
+3. Install and start the service:
+```bash
+# Copy service file to systemd
+sudo cp appointment-checker.service /etc/systemd/system/
+
+# Reload systemd daemon
+sudo systemctl daemon-reload
+
+# Enable service to start on boot
+sudo systemctl enable appointment-checker --now
+
+# Check service status
+sudo systemctl status appointment-checker
+```
+
+4. View the logs:
+```bash
+# View last 100 lines
+sudo journalctl -u appointment-checker -n 100
 ```
